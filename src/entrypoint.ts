@@ -39,9 +39,9 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     }
 
     await this.env.DB.prepare(
-      "INSERT INTO users (display_name, email, password, tenant) VALUES (?, ?, ?, ?)",
+      "INSERT INTO users (id, display_name, email, password, tenant) VALUES (?, ?, ?, ?, ?)",
     )
-      .bind(displayName, email, hashedPassword, tenant)
+      .bind(crypto.randomUUID(), displayName, email, hashedPassword, tenant)
       .run();
   }
 
