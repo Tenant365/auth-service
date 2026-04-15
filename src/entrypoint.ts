@@ -64,7 +64,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       throw new Error("Invalid password");
     }
 
-    return signJWT(jwt.issuer, jwt.audience, {
+    return signJWT(jwt.issuer, jwt.audience, this.env.JWT_SECRET, {
       sub: user.id,
       email: user.email,
       displayName: user.display_name,

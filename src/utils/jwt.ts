@@ -1,8 +1,11 @@
 import { SignJWT } from "jose";
 
+import type { Env } from "../types";
+
 export const signJWT = async (
   issuer: string,
   audience: string,
+  secret: string,
   payload: any,
 ) => {
   return await new SignJWT(payload)
@@ -12,5 +15,5 @@ export const signJWT = async (
     .setAudience(audience)
     .setExpirationTime("1h")
     .setIssuedAt()
-    .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+    .sign(new TextEncoder().encode(secret));
 };
