@@ -5,6 +5,7 @@ export type Env = {
   SESSIONS: KVNamespace;
   JWT_PRIVATE_KEY: string;
   JWT_PUBLIC_KEY: string;
+  JWT_SECRET: string;
 };
 
 export type AuthContext = {
