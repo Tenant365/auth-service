@@ -1,1 +1,4 @@
-export { AuthEntrypoint } from "./entrypoint";
+import { AuthEntrypoint } from "./entrypoint";
+
+export default AuthEntrypoint;
+export { AuthEntrypoint };
