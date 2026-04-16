@@ -126,7 +126,9 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     return { success: true, token };
   }
 
-  async verifyEmail(code: string): Promise<{ success: boolean }> {
+  async verifyEmail(
+    code: string,
+  ): Promise<{ success: boolean; message?: string }> {
     const verificationToken = Buffer.from(code, "base64url").toString("utf-8");
     const [verificationId, verificationCode] = verificationToken.split(":");
 
@@ -137,15 +139,15 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       .first<VerificationRecord>();
 
     if (!verification) {
-      throw new Error("Verification not found");
+      return { success: false, message: "Verification not found" };
     }
 
     if (!(await verifyPassword(verificationCode, verification.code))) {
-      throw new Error("Invalid verification code");
+      return { success: false, message: "Invalid verification code" };
     }
 
     if (new Date(verification.expires_at) < new Date()) {
-      throw new Error("Verification expired");
+      return { success: false, message: "Verification expired" };
     }
 
     const result = await this.env.DB.prepare(
@@ -155,10 +157,10 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       .run();
 
     if (!result) {
-      throw new Error("Failed to verify user");
+      return { success: false, message: "Failed to verify user" };
     }
 
-    return { success: true };
+    return { success: true, message: "User verified successfully" };
   }
 }
 
