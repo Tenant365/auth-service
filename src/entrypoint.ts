@@ -60,10 +60,12 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     const verificationCode = generateRandomSecret(32);
     const verificationCodeHash = await hashPassword(verificationCode);
 
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24);
+
     const verificationResult = await this.env.DB.prepare(
-      "INSERT INTO verifications (id, email, code, user) VALUES (?, ?, ?, ?) RETURNING id",
+      "INSERT INTO verifications (id, email, code, user, expires_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
     )
-      .bind(crypto.randomUUID(), email, verificationCodeHash, userId)
+      .bind(crypto.randomUUID(), email, verificationCodeHash, userId, expiresAt)
       .run();
 
     if (!result) {
