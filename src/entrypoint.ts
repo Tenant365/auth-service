@@ -50,6 +50,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     email: string,
     password: string,
     tenant?: string | null,
+    domain?: string | null,
   ): Promise<{ success: boolean; userId?: string; emailSent?: boolean }> {
     const user = await this.env.DB.prepare(
       "SELECT * FROM users WHERE email = ?",
@@ -99,7 +100,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     const verificationToken = encodeBase64Url(
       `${verificationId}:${verificationCode}`,
     );
-    const verificationUrl = `${env.DOMAIN}/verify?code=${verificationToken}`;
+    const verificationUrl = `${domain ?? "http://localhost:3000"}/verify?code=${verificationToken}`;
 
     let emailSent = false;
     try {
