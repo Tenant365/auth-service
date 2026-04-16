@@ -17,7 +17,10 @@ function encodeBase64Url(value: string): string {
     binary += String.fromCharCode(byte);
   }
 
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 function decodeBase64Url(value: string): string {
@@ -104,8 +107,10 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
         from: "noreply@tenant365.cloud",
         to: email,
         template: {
-          id: "email-verification",
+          id: "email-verification-default",
           variables: {
+            T365_USER_NAME: displayName,
+            T365_EMAIL_ADDRESS: email,
             EMAIL_VERIFICATION_URL: verificationUrl,
           },
         },
