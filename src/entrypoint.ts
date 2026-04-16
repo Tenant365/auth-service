@@ -102,27 +102,20 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     );
     const verificationUrl = `${domain ?? "http://localhost:3000"}/verify?code=${verificationToken}`;
 
-    let emailSent = false;
-    try {
-      await resend.emails.send({
-        from: "noreply@tenant365.cloud",
-        to: email,
-        template: {
-          id: "email-verification-default",
-          variables: {
-            T365_USER_NAME: displayName,
-            T365_EMAIL_ADDRESS: email,
-            EMAIL_VERIFICATION_URL: verificationUrl,
-          },
+    resend.emails.send({
+      from: "noreply@tenant365.cloud",
+      to: email,
+      template: {
+        id: "email-verification-default",
+        variables: {
+          T365_USER_NAME: displayName,
+          T365_EMAIL_ADDRESS: email,
+          EMAIL_VERIFICATION_URL: verificationUrl,
         },
-      });
-      emailSent = true;
-    } catch (error) {
-      console.error(error);
-      emailSent = false;
-    }
+      },
+    });
 
-    return { success: true, userId, emailSent };
+    return { success: true, userId, emailSent: true };
   }
 
   async login(
