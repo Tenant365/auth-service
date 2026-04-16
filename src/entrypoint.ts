@@ -8,7 +8,7 @@ import { signJWT } from "./utils/jwt";
 import { Resend } from "resend";
 import { generateRandomSecret } from "./utils/secret";
 
-const resend = new Resend(env.RESEND_API_KEY);
+const resend = new Resend(env.RESEND_API_KEY as string);
 
 type UserRecord = {
   id: string;
@@ -58,18 +58,24 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     const userId = result.results[0].id as string;
 
     const verificationCode = generateRandomSecret(32);
+    const verificationCodeHash = await hashPassword(verificationCode);
 
-    await this.env.DB.prepare(
-      "INSERT INTO verifications (id, email, code, user) VALUES (?, ?, ?, ?)",
+    const verificationResult = await this.env.DB.prepare(
+      "INSERT INTO verifications (id, email, code, user) VALUES (?, ?, ?, ?) RETURNING id",
     )
-      .bind(crypto.randomUUID(), email, verificationCode, userId)
+      .bind(crypto.randomUUID(), email, verificationCodeHash, userId)
       .run();
 
     if (!result) {
       return { success: false };
     }
 
-    const verificationUrl = `${env.DOMAIN}/verify?code=${verificationCode}`;
+    const verificationId = verificationResult.results[0].id as string;
+    // base64url verificationId:verificationCode
+    const verificationToken = Buffer.from(
+      `${verificationId}:${verificationCode}`,
+    ).toString("base64url");
+    const verificationUrl = `${env.DOMAIN}/verify?code=${verificationToken}`;
 
     let emailSent = false;
     try {
@@ -119,4 +125,49 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     return { success: true, token };
   }
+
+  async verifyEmail(code: string): Promise<{ success: boolean }> {
+    const verificationToken = Buffer.from(code, "base64url").toString("utf-8");
+    const [verificationId, verificationCode] = verificationToken.split(":");
+
+    const verification = await this.env.DB.prepare(
+      "SELECT * FROM verifications WHERE id = ?",
+    )
+      .bind(verificationId)
+      .first<VerificationRecord>();
+
+    if (!verification) {
+      throw new Error("Verification not found");
+    }
+
+    if (!(await verifyPassword(verificationCode, verification.code))) {
+      throw new Error("Invalid verification code");
+    }
+
+    if (new Date(verification.expires_at) < new Date()) {
+      throw new Error("Verification expired");
+    }
+
+    const result = await this.env.DB.prepare(
+      "UPDATE users SET verified = 1 WHERE id = ?",
+    )
+      .bind(verification.user)
+      .run();
+
+    if (!result) {
+      throw new Error("Failed to verify user");
+    }
+
+    return { success: true };
+  }
 }
+
+type VerificationRecord = {
+  id: string;
+  email: string;
+  code: string;
+  user: string;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+};
