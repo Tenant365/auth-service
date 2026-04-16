@@ -6,6 +6,7 @@ import { hashPassword, verifyPassword } from "./utils/password";
 import { signJWT } from "./utils/jwt";
 
 import { Resend } from "resend";
+import { generateRandomSecret } from "./utils/secret";
 
 const resend = new Resend(env.RESEND_API_KEY);
 
@@ -56,13 +57,31 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     const userId = result.results[0].id as string;
 
+    const verificationCode = generateRandomSecret(32);
+
+    await this.env.DB.prepare(
+      "INSERT INTO verifications (id, email, code, user) VALUES (?, ?, ?, ?)",
+    )
+      .bind(crypto.randomUUID(), email, verificationCode, userId)
+      .run();
+
+    if (!result) {
+      return { success: false };
+    }
+
+    const verificationUrl = `${env.DOMAIN}/verify?code=${verificationCode}`;
+
     let emailSent = false;
     try {
       await resend.emails.send({
         from: "noreply@tenant365.cloud",
         to: email,
-        subject: "Welcome to Tenant365",
-        text: "User ID: " + userId,
+        template: {
+          id: "email-verification",
+          variables: {
+            EMAIL_VERIFICATION_URL: verificationUrl,
+          },
+        },
       });
       emailSent = true;
     } catch (error) {
