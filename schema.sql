@@ -13,15 +13,16 @@ CREATE INDEX idx_destinations_email ON destinations (email);
 
 CREATE TABLE verifications (
     id UUID PRIMARY KEY,
-    destination VARCHAR(255) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL,
     code VARCHAR(255) NOT NULL,
+  	user UUID NOT NULL,
     expires_at TIMESTAMP NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (destination) REFERENCES destinations (email) ON DELETE CASCADE
+  	FOREIGN KEY (user) REFERENCES users (id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_verifications_destination_email ON verifications (destination);
+CREATE INDEX idx_verifications_email ON verifications (email);
 
 DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS organizations;
@@ -60,6 +61,8 @@ CREATE TABLE users (
     email VARCHAR(255) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
     tenant UUID,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    verified BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP NULL,

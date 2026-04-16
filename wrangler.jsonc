@@ -19,6 +19,9 @@
     },
   ],
   "workers_dev": false,
+  "vars": {
+    "RESEND_API_KEY": "@resend_api_key",
+  },
   /**
    * Smart Placement
    * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

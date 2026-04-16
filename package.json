@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
-    "jose": "^6.2.2"
+    "jose": "^6.2.2",
+    "resend": "^6.12.0"
   }
 }

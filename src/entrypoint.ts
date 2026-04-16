@@ -1,7 +1,13 @@
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { env, WorkerEntrypoint } from "cloudflare:workers";
+
 import type { Env } from "./types";
+
 import { hashPassword, verifyPassword } from "./utils/password";
 import { signJWT } from "./utils/jwt";
+
+import { Resend } from "resend";
+
+const resend = new Resend(env.RESEND_API_KEY);
 
 type UserRecord = {
   id: string;
@@ -21,7 +27,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     email: string,
     password: string,
     tenant?: string | null,
-  ): Promise<void> {
+  ): Promise<{ success: boolean; userId?: string }> {
     const user = await this.env.DB.prepare(
       "SELECT * FROM users WHERE email = ?",
     )
@@ -38,18 +44,33 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       throw new Error("Failed to hash password");
     }
 
-    await this.env.DB.prepare(
-      "INSERT INTO users (id, display_name, email, password, tenant) VALUES (?, ?, ?, ?, ?)",
+    const result = await this.env.DB.prepare(
+      "INSERT INTO users (id, display_name, email, password, tenant) VALUES (?, ?, ?, ?, ?) RETURNING id",
     )
       .bind(crypto.randomUUID(), displayName, email, hashedPassword, tenant)
       .run();
+
+    if (!result) {
+      return { success: false };
+    }
+
+    const userId = result.results[0].id as string;
+
+    await resend.emails.send({
+      from: "noreply@tenant365.com",
+      to: email,
+      subject: "Welcome to Tenant365",
+      text: "User ID: " + userId,
+    });
+
+    return { success: true, userId };
   }
 
   async login(
     email: string,
     password: string,
     jwt: JWTConfig,
-  ): Promise<string> {
+  ): Promise<{ success: boolean; token?: string }> {
     const user = await this.env.DB.prepare(
       "SELECT * FROM users WHERE email = ? AND enabled = 1 AND deleted_at IS NULL",
     )
@@ -64,10 +85,12 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       throw new Error("Invalid password");
     }
 
-    return signJWT(jwt.issuer, jwt.audience, this.env.JWT_SECRET, {
+    const token = await signJWT(jwt.issuer, jwt.audience, this.env.JWT_SECRET, {
       sub: user.id,
       email: user.email,
       displayName: user.display_name,
     });
+
+    return { success: true, token };
   }
 }
