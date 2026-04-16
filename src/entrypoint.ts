@@ -10,6 +10,25 @@ import { generateRandomSecret } from "./utils/secret";
 
 const resend = new Resend(env.RESEND_API_KEY as string);
 
+function encodeBase64Url(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeBase64Url(value: string): string {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+
+  return new TextDecoder().decode(bytes);
+}
+
 type UserRecord = {
   id: string;
   display_name: string;
@@ -74,9 +93,9 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     const verificationId = verificationResult.results[0].id as string;
     // base64url verificationId:verificationCode
-    const verificationToken = Buffer.from(
+    const verificationToken = encodeBase64Url(
       `${verificationId}:${verificationCode}`,
-    ).toString("base64url");
+    );
     const verificationUrl = `${env.DOMAIN}/verify?code=${verificationToken}`;
 
     let emailSent = false;
@@ -131,7 +150,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
   async verifyEmail(
     code: string,
   ): Promise<{ success: boolean; message?: string }> {
-    const verificationToken = Buffer.from(code, "base64url").toString("utf-8");
+    const verificationToken = decodeBase64Url(code);
     const [verificationId, verificationCode] = verificationToken.split(":");
 
     const verification = await this.env.DB.prepare(
