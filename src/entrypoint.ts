@@ -27,7 +27,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     email: string,
     password: string,
     tenant?: string | null,
-  ): Promise<{ success: boolean; userId?: string }> {
+  ): Promise<{ success: boolean; userId?: string; emailSent?: boolean }> {
     const user = await this.env.DB.prepare(
       "SELECT * FROM users WHERE email = ?",
     )
@@ -56,14 +56,21 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     const userId = result.results[0].id as string;
 
-    await resend.emails.send({
-      from: "noreply@tenant365.com",
-      to: email,
-      subject: "Welcome to Tenant365",
-      text: "User ID: " + userId,
-    });
+    let emailSent = false;
+    try {
+      await resend.emails.send({
+        from: "noreply@tenant365.com",
+        to: email,
+        subject: "Welcome to Tenant365",
+        text: "User ID: " + userId,
+      });
+      emailSent = true;
+    } catch (error) {
+      console.error(error);
+      emailSent = false;
+    }
 
-    return { success: true, userId };
+    return { success: true, userId, emailSent };
   }
 
   async login(

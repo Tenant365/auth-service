@@ -1,15 +1,4 @@
 DROP TABLE IF EXISTS verifications;
-DROP TABLE IF EXISTS destinations;
-
-CREATE TABLE destinations (
-    id UUID PRIMARY KEY,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_destinations_email ON destinations (email);
 
 CREATE TABLE verifications (
     id UUID PRIMARY KEY,
