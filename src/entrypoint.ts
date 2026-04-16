@@ -59,7 +59,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     let emailSent = false;
     try {
       await resend.emails.send({
-        from: "noreply@tenant365.com",
+        from: "noreply@tenant365.cloud",
         to: email,
         subject: "Welcome to Tenant365",
         text: "User ID: " + userId,
