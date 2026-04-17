@@ -212,7 +212,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
         accessToken: accessToken,
       }),
       {
-        expiration: expiresIn,
+        expirationTtl: expiresIn,
       },
     );
 
