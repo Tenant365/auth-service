@@ -18,11 +18,18 @@
       "remote": true,
     },
   ],
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "685c61837c6848ab96fe9ac4ede12af2",
+      "remote": true,
+    },
+  ],
   "workers_dev": false,
-  // "vars": {
-  //   "DOMAIN": "@domain",
-  //   "RESEND_API_KEY": "@resend_api_key",
-  // },
+  "vars": {
+    "DOMAIN": "@domain",
+    "RESEND_API_KEY": "@resend_api_key",
+  },
   /**
    * Smart Placement
    * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

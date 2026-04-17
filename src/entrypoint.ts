@@ -182,6 +182,54 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     return { success: true, message: "User verified successfully" };
   }
+
+  async loginWithSSO(
+    email: string,
+    provider: string,
+    externalUserId: string,
+    accessToken: string,
+    expiresIn: number,
+  ): Promise<{ success: boolean; token?: string }> {
+    const user = await this.env.DB.prepare(
+      "SELECT * FROM users WHERE email = ? AND enabled = 1 AND deleted_at IS NULL",
+    )
+      .bind(email)
+      .first<UserRecord>();
+
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    const userKey = `${provider}:${user.id}:${externalUserId}`;
+    await this.env.KV.put(
+      userKey,
+      JSON.stringify({
+        id: user.id,
+        email: user.email,
+        displayName: user.display_name,
+        provider: provider,
+        externalUserId: externalUserId,
+        accessToken: accessToken,
+      }),
+      {
+        expiration: expiresIn,
+      },
+    );
+
+    const token = await signJWT(
+      "https://tenant365.cloud",
+      "https://tenant365.cloud",
+      this.env.JWT_SECRET,
+      {
+        sub: user.id,
+        email: user.email,
+        displayName: user.display_name,
+        provider: provider,
+      },
+    );
+
+    return { success: true, token };
+  }
 }
 
 type VerificationRecord = {
