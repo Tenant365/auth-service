@@ -137,11 +137,25 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       throw new Error("Invalid password");
     }
 
+    const jti = crypto.randomUUID();
     const token = await signJWT(jwt.issuer, jwt.audience, this.env.JWT_SECRET, {
+      jti: jti,
       sub: user.id,
       email: user.email,
       displayName: user.display_name,
     });
+
+    await this.env.KV.put(
+      `session:${jti}`,
+      JSON.stringify({
+        userId: user.id,
+        email: user.email,
+        displayName: user.display_name,
+      }),
+      {
+        expirationTtl: 60 * 60,
+      },
+    );
 
     return { success: true, token };
   }
@@ -216,16 +230,32 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       },
     );
 
+    const jti = crypto.randomUUID();
     const token = await signJWT(
       "https://tenant365.cloud",
       "https://tenant365.cloud",
       this.env.JWT_SECRET,
       {
+        jti: jti,
         sub: user.id,
         email: user.email,
         displayName: user.display_name,
         provider: provider,
         _userId: externalUserId,
+      },
+    );
+
+    await this.env.KV.put(
+      `session:${jti}`,
+      JSON.stringify({
+        userId: user.id,
+        email: user.email,
+        displayName: user.display_name,
+        provider: provider,
+        _userId: externalUserId,
+      }),
+      {
+        expirationTtl: expiresIn,
       },
     );
 
