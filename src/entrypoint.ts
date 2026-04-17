@@ -225,6 +225,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
         email: user.email,
         displayName: user.display_name,
         provider: provider,
+        _userId: externalUserId,
       },
     );
 
