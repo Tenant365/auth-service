@@ -522,6 +522,42 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     }
   }
 
+  // ─── Password Management ─────────────────────────────────────────────────
+
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<{ success: boolean; message?: string }> {
+    const user = await this.env.DB.prepare(
+      "SELECT id, password FROM users WHERE id = ? AND enabled = 1 AND deleted_at IS NULL",
+    )
+      .bind(userId)
+      .first<{ id: string; password: string }>();
+
+    if (!user) return { success: false, message: "User not found" };
+    if (!(await verifyPassword(currentPassword, user.password))) {
+      return { success: false, message: "Current password is incorrect" };
+    }
+
+    const newHash = await hashPassword(newPassword);
+    if (!newHash) return { success: false, message: "Failed to hash password" };
+
+    await this.env.DB.prepare("UPDATE users SET password = ? WHERE id = ?")
+      .bind(newHash, userId)
+      .run();
+
+    return { success: true };
+  }
+
+  async getUserProfile(userId: string): Promise<{ id: string; email: string; display_name: string } | null> {
+    return this.env.DB.prepare(
+      "SELECT id, email, display_name FROM users WHERE id = ? AND enabled = 1 AND deleted_at IS NULL",
+    )
+      .bind(userId)
+      .first<{ id: string; email: string; display_name: string }>();
+  }
+
   // ─── Email Verification ───────────────────────────────────────────────────
 
   async verifyEmail(code: string): Promise<{ success: boolean; message?: string }> {
