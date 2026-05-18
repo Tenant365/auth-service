@@ -35,10 +35,18 @@ type UserRecord = {
   two_factor_required?: boolean | number;
 };
 
+type LogContext = {
+  ip?: string | null;
+  country?: string | null;
+  city?: string | null;
+  userAgent?: string | null;
+};
+
 type PendingSession = {
   userId: string;
   email: string;
   displayName: string;
+  context?: LogContext;
 };
 
 type FullSessionResult = {
@@ -107,14 +115,33 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     return { success: true, token, refreshToken: refreshHandle };
   }
 
-  async #issuePendingSession(user: { id: string; email: string; display_name: string }): Promise<string> {
+  async #issuePendingSession(user: { id: string; email: string; display_name: string }, context?: LogContext): Promise<string> {
     const pendingToken = crypto.randomUUID();
     await this.env.KV.put(
       `pending_2fa:${pendingToken}`,
-      JSON.stringify({ userId: user.id, email: user.email, displayName: user.display_name }),
+      JSON.stringify({ userId: user.id, email: user.email, displayName: user.display_name, context }),
       { expirationTtl: 60 * 5 },
     );
     return pendingToken;
+  }
+
+  async #writeSignInLog(userId: string, provider: string, context?: LogContext | null): Promise<void> {
+    try {
+      await this.env.DB.prepare(
+        "INSERT INTO sign_in_logs (id, user_id, created_at, ip_address, country, city, user_agent, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+        .bind(
+          crypto.randomUUID(),
+          userId,
+          Math.floor(Date.now() / 1000),
+          context?.ip ?? null,
+          context?.country ?? null,
+          context?.city ?? null,
+          context?.userAgent ?? null,
+          provider,
+        )
+        .run();
+    } catch { /* best-effort */ }
   }
 
   async #verifyBackupCodeForUser(userId: string, code: string): Promise<boolean> {
@@ -200,6 +227,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     email: string,
     password: string,
     jwt: JWTConfig,
+    context?: LogContext,
   ): Promise<{
     success: boolean;
     token?: string;
@@ -225,16 +253,17 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     const totpEnabled = Boolean(user.totp_enabled);
 
     if (twoFactorRequired && !totpEnabled) {
-      const pendingToken = await this.#issuePendingSession(user);
+      const pendingToken = await this.#issuePendingSession(user, context);
       return { success: true, requiresTwoFactorSetup: true, pendingToken };
     }
 
     if (totpEnabled) {
-      const pendingToken = await this.#issuePendingSession(user);
+      const pendingToken = await this.#issuePendingSession(user, context);
       return { success: true, requiresTwoFactor: true, pendingToken };
     }
 
     const session = await this.#issueFullSession(user, jwt);
+    void this.#writeSignInLog(user.id, "password", context);
     return session;
   }
 
@@ -364,6 +393,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     await this.env.KV.delete(`pending_2fa:${pendingToken}`);
     const session = await this.#issueFullSession(user, jwt);
+    void this.#writeSignInLog(user.id, "password", pending.context);
     return session;
   }
 
@@ -389,6 +419,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     await this.env.KV.delete(`pending_2fa:${pendingToken}`);
     const session = await this.#issueFullSession(user, jwt);
+    void this.#writeSignInLog(user.id, "password", pending.context);
     return session;
   }
 
@@ -592,6 +623,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     accessToken: string,
     expiresIn: number,
     jwt: JWTConfig,
+    context?: LogContext,
   ): Promise<{ success: boolean; token?: string; refreshToken?: string }> {
     const user = await this.env.DB.prepare(
       "SELECT id, display_name, email FROM users WHERE email = ? AND enabled = 1 AND deleted_at IS NULL",
@@ -634,6 +666,34 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       { expirationTtl: Math.min(expiresIn, 60 * 60 * 24 * 14) },
     );
 
+    void this.#writeSignInLog(user.id, provider, context);
     return { success: true, token, refreshToken: refreshHandle };
+  }
+
+  async getSignInLogs(userId: string, limit = 20): Promise<Array<{
+    id: string;
+    user_id: string;
+    created_at: number;
+    ip_address: string | null;
+    country: string | null;
+    city: string | null;
+    user_agent: string | null;
+    provider: string;
+  }>> {
+    const result = await this.env.DB.prepare(
+      "SELECT id, user_id, created_at, ip_address, country, city, user_agent, provider FROM sign_in_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+    )
+      .bind(userId, limit)
+      .all<{
+        id: string;
+        user_id: string;
+        created_at: number;
+        ip_address: string | null;
+        country: string | null;
+        city: string | null;
+        user_agent: string | null;
+        provider: string;
+      }>();
+    return result.results;
   }
 }
