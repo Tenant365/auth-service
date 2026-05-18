@@ -553,6 +553,11 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     }
   }
 
+  async checkSession(jti: string): Promise<boolean> {
+    const session = await this.env.KV.get(`session:${jti}`);
+    return session !== null;
+  }
+
   // ─── Password Management ─────────────────────────────────────────────────
 
   async changePassword(
