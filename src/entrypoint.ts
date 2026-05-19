@@ -6,6 +6,20 @@ import { hashPassword, verifyPassword } from "./utils/password";
 import { signJWT } from "./utils/jwt";
 import { Resend } from "resend";
 import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} from "@simplewebauthn/server";
+import { isoBase64URL } from "@simplewebauthn/server/helpers";
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+  AuthenticationResponseJSON,
+  AuthenticatorTransportFuture as AuthenticatorTransport,
+} from "@simplewebauthn/server";
+import {
   verifyTOTP,
   buildTotpUri,
   generateBase32Secret,
@@ -684,9 +698,10 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     city: string | null;
     user_agent: string | null;
     provider: string;
+    oauth2_jti: string | null;
   }>> {
     const result = await this.env.DB.prepare(
-      "SELECT id, user_id, created_at, ip_address, country, city, user_agent, provider FROM sign_in_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+      "SELECT id, user_id, created_at, ip_address, country, city, user_agent, provider, oauth2_jti FROM sign_in_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
     )
       .bind(userId, limit)
       .all<{
@@ -698,7 +713,243 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
         city: string | null;
         user_agent: string | null;
         provider: string;
+        oauth2_jti: string | null;
       }>();
     return result.results;
+  }
+
+  // ─── Sign-in log: link OAuth2 JTI ────────────────────────────────────────
+
+  async linkSignInLogOAuth2Jti(userId: string, oauth2Jti: string): Promise<void> {
+    try {
+      await this.env.DB.prepare(
+        "UPDATE sign_in_logs SET oauth2_jti = ? WHERE user_id = ? AND oauth2_jti IS NULL ORDER BY created_at DESC LIMIT 1",
+      )
+        .bind(oauth2Jti, userId)
+        .run();
+    } catch { /* best-effort */ }
+  }
+
+  // ─── Passkeys ────────────────────────────────────────────────────────────
+
+  async generatePasskeyRegistrationOptions(userId: string): Promise<PublicKeyCredentialCreationOptionsJSON> {
+    const user = await this.env.DB.prepare(
+      "SELECT id, email, display_name FROM users WHERE id = ? AND enabled = 1 AND deleted_at IS NULL",
+    )
+      .bind(userId)
+      .first<{ id: string; email: string; display_name: string }>();
+
+    if (!user) throw new Error("User not found");
+
+    // Fetch existing credentials to exclude
+    const existing = await this.env.DB.prepare(
+      "SELECT id FROM passkey_credentials WHERE user_id = ?",
+    )
+      .bind(userId)
+      .all<{ id: string }>();
+
+    const options = await generateRegistrationOptions({
+      rpName: "Tenant365",
+      rpID: "tenant365.cloud",
+      userName: user.email,
+      userDisplayName: user.display_name,
+      attestationType: "none",
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        requireResidentKey: true,
+        residentKey: "required",
+        userVerification: "required",
+      },
+      excludeCredentials: existing.results.map((c) => ({ id: c.id })),
+      timeout: 60000,
+    });
+
+    // Store challenge in KV keyed by userId (one pending registration at a time)
+    await this.env.KV.put(
+      `passkey:reg-challenge:${userId}`,
+      options.challenge,
+      { expirationTtl: 60 * 5 },
+    );
+
+    return options;
+  }
+
+  async verifyPasskeyRegistration(
+    userId: string,
+    response: RegistrationResponseJSON,
+    name: string,
+  ): Promise<{ success: boolean; credentialId?: string; message?: string }> {
+    const expectedChallenge = await this.env.KV.get(`passkey:reg-challenge:${userId}`);
+    if (!expectedChallenge) return { success: false, message: "Challenge expired or not found" };
+
+    try {
+      const verification = await verifyRegistrationResponse({
+        response,
+        expectedChallenge,
+        expectedOrigin: ["https://account.tenant365.cloud", "http://localhost:3000"],
+        expectedRPID: "tenant365.cloud",
+        requireUserVerification: true,
+      });
+
+      if (!verification.verified || !verification.registrationInfo) {
+        return { success: false, message: "Passkey registration verification failed" };
+      }
+
+      await this.env.KV.delete(`passkey:reg-challenge:${userId}`);
+
+      const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+
+      await this.env.DB.prepare(
+        "INSERT INTO passkey_credentials (id, user_id, name, public_key, counter, device_type, backed_up, transports, aaguid, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+        .bind(
+          credential.id,
+          userId,
+          name,
+          isoBase64URL.fromBuffer(credential.publicKey),
+          credential.counter,
+          credentialDeviceType,
+          credentialBackedUp ? 1 : 0,
+          credential.transports ? JSON.stringify(credential.transports) : null,
+          verification.registrationInfo.aaguid ?? null,
+          Math.floor(Date.now() / 1000),
+        )
+        .run();
+
+      return { success: true, credentialId: credential.id };
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : "Verification failed" };
+    }
+  }
+
+  async generatePasskeyAuthenticationOptions(): Promise<{
+    options: PublicKeyCredentialRequestOptionsJSON;
+    challengeId: string;
+  }> {
+    const options = await generateAuthenticationOptions({
+      rpID: "tenant365.cloud",
+      allowCredentials: [],
+      userVerification: "required",
+      timeout: 60000,
+    });
+
+    const challengeId = crypto.randomUUID();
+    await this.env.KV.put(
+      `passkey:auth-challenge:${challengeId}`,
+      options.challenge,
+      { expirationTtl: 60 * 5 },
+    );
+
+    return { options, challengeId };
+  }
+
+  async verifyPasskeyAuthentication(
+    challengeId: string,
+    response: AuthenticationResponseJSON,
+    jwt: JWTConfig,
+    context?: LogContext | null,
+  ): Promise<{ success: boolean; token?: string; refreshToken?: string; message?: string }> {
+    const expectedChallenge = await this.env.KV.get(`passkey:auth-challenge:${challengeId}`);
+    if (!expectedChallenge) return { success: false, message: "Challenge expired or not found" };
+
+    const credential = await this.env.DB.prepare(
+      "SELECT id, user_id, public_key, counter, transports FROM passkey_credentials WHERE id = ?",
+    )
+      .bind(response.id)
+      .first<{ id: string; user_id: string; public_key: string; counter: number; transports: string | null }>();
+
+    if (!credential) return { success: false, message: "Passkey not found" };
+
+    try {
+      const verification = await verifyAuthenticationResponse({
+        response,
+        expectedChallenge,
+        expectedOrigin: ["https://login.tenant365.cloud", "http://localhost:3000"],
+        expectedRPID: "tenant365.cloud",
+        credential: {
+          id: credential.id,
+          publicKey: isoBase64URL.toBuffer(credential.public_key),
+          counter: credential.counter,
+          transports: credential.transports
+            ? (JSON.parse(credential.transports) as AuthenticatorTransport[])
+            : undefined,
+        },
+        requireUserVerification: true,
+      });
+
+      if (!verification.verified) return { success: false, message: "Passkey authentication failed" };
+
+      await this.env.KV.delete(`passkey:auth-challenge:${challengeId}`);
+
+      // Update counter and last_used_at
+      await this.env.DB.prepare(
+        "UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?",
+      )
+        .bind(verification.authenticationInfo.newCounter, Math.floor(Date.now() / 1000), credential.id)
+        .run();
+
+      const user = await this.env.DB.prepare(
+        "SELECT id, display_name, email FROM users WHERE id = ? AND enabled = 1 AND deleted_at IS NULL",
+      )
+        .bind(credential.user_id)
+        .first<{ id: string; display_name: string; email: string }>();
+
+      if (!user) return { success: false, message: "User not found or deactivated" };
+
+      const session = await this.#issueFullSession(user, jwt);
+      void this.#writeSignInLog(user.id, "passkey", context);
+      return session;
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : "Verification failed" };
+    }
+  }
+
+  async listPasskeys(userId: string): Promise<Array<{
+    id: string;
+    name: string;
+    device_type: string;
+    backed_up: boolean;
+    created_at: number;
+    last_used_at: number | null;
+    aaguid: string | null;
+  }>> {
+    const result = await this.env.DB.prepare(
+      "SELECT id, name, device_type, backed_up, created_at, last_used_at, aaguid FROM passkey_credentials WHERE user_id = ? ORDER BY created_at DESC",
+    )
+      .bind(userId)
+      .all<{
+        id: string;
+        name: string;
+        device_type: string;
+        backed_up: number;
+        created_at: number;
+        last_used_at: number | null;
+        aaguid: string | null;
+      }>();
+
+    return result.results.map((r) => ({
+      ...r,
+      backed_up: Boolean(r.backed_up),
+    }));
+  }
+
+  async deletePasskey(userId: string, credentialId: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const existing = await this.env.DB.prepare(
+        "SELECT id FROM passkey_credentials WHERE id = ? AND user_id = ?",
+      )
+        .bind(credentialId, userId)
+        .first<{ id: string }>();
+
+      if (!existing) return { success: false, message: "Passkey not found" };
+
+      await this.env.DB.prepare("DELETE FROM passkey_credentials WHERE id = ? AND user_id = ?")
+        .bind(credentialId, userId)
+        .run();
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : "Failed to delete passkey" };
+    }
   }
 }
