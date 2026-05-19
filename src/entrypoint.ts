@@ -67,6 +67,8 @@ type FullSessionResult = {
   success: true;
   token: string;
   refreshToken: string;
+  /** The auth-service session JTI — stored in sign_in_logs for revoke cleanup. */
+  jti: string;
 };
 
 function encodeBase64Url(value: string): string {
@@ -126,7 +128,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       { expirationTtl: 60 * 60 * 24 * 14 },
     );
 
-    return { success: true, token, refreshToken: refreshHandle };
+    return { success: true, token, refreshToken: refreshHandle, jti };
   }
 
   async #issuePendingSession(user: { id: string; email: string; display_name: string }, context?: LogContext): Promise<string> {
@@ -139,10 +141,10 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     return pendingToken;
   }
 
-  async #writeSignInLog(userId: string, provider: string, context?: LogContext | null): Promise<void> {
+  async #writeSignInLog(userId: string, provider: string, context?: LogContext | null, authJti?: string | null): Promise<void> {
     try {
       await this.env.DB.prepare(
-        "INSERT INTO sign_in_logs (id, user_id, created_at, ip_address, country, city, user_agent, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO sign_in_logs (id, user_id, created_at, ip_address, country, city, user_agent, provider, auth_jti) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
         .bind(
           crypto.randomUUID(),
@@ -153,6 +155,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
           context?.city ?? null,
           context?.userAgent ?? null,
           provider,
+          authJti ?? null,
         )
         .run();
     } catch { /* best-effort */ }
@@ -277,7 +280,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     }
 
     const session = await this.#issueFullSession(user, jwt);
-    void this.#writeSignInLog(user.id, "password", context);
+    void this.#writeSignInLog(user.id, "password", context, session.jti);
     return session;
   }
 
@@ -407,7 +410,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     await this.env.KV.delete(`pending_2fa:${pendingToken}`);
     const session = await this.#issueFullSession(user, jwt);
-    void this.#writeSignInLog(user.id, "password", pending.context);
+    void this.#writeSignInLog(user.id, "password", pending.context, session.jti);
     return session;
   }
 
@@ -433,7 +436,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
     await this.env.KV.delete(`pending_2fa:${pendingToken}`);
     const session = await this.#issueFullSession(user, jwt);
-    void this.#writeSignInLog(user.id, "password", pending.context);
+    void this.#writeSignInLog(user.id, "password", pending.context, session.jti);
     return session;
   }
 
@@ -685,7 +688,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       { expirationTtl: Math.min(expiresIn, 60 * 60 * 24 * 14) },
     );
 
-    void this.#writeSignInLog(user.id, provider, context);
+    void this.#writeSignInLog(user.id, provider, context, jti);
     return { success: true, token, refreshToken: refreshHandle };
   }
 
@@ -699,9 +702,10 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     user_agent: string | null;
     provider: string;
     oauth2_jti: string | null;
+    revoked_at: number | null;
   }>> {
     const result = await this.env.DB.prepare(
-      "SELECT id, user_id, created_at, ip_address, country, city, user_agent, provider, oauth2_jti FROM sign_in_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+      "SELECT id, user_id, created_at, ip_address, country, city, user_agent, provider, oauth2_jti, revoked_at FROM sign_in_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
     )
       .bind(userId, limit)
       .all<{
@@ -714,6 +718,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
         user_agent: string | null;
         provider: string;
         oauth2_jti: string | null;
+        revoked_at: number | null;
       }>();
     return result.results;
   }
@@ -728,6 +733,44 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
         .bind(oauth2Jti, userId)
         .run();
     } catch { /* best-effort */ }
+  }
+
+  // ─── Session revocation ──────────────────────────────────────────────────────
+
+  /**
+   * Revoke the auth-service session associated with a sign-in log entry and
+   * mark the log as revoked. Called from the account portal after the OAuth2
+   * session has already been invalidated.
+   */
+  async revokeSessionByLogId(
+    userId: string,
+    logId: string,
+  ): Promise<{ success: boolean; message?: string }> {
+    try {
+      const log = await this.env.DB.prepare(
+        "SELECT auth_jti FROM sign_in_logs WHERE id = ? AND user_id = ?",
+      )
+        .bind(logId, userId)
+        .first<{ auth_jti: string | null }>();
+
+      if (!log) return { success: false, message: "Sign-in log not found" };
+
+      // Delete auth-service session from KV (best-effort — may already be expired)
+      if (log.auth_jti) {
+        await this.env.KV.delete(`session:${log.auth_jti}`).catch(() => {});
+      }
+
+      // Mark the log as revoked in the DB
+      await this.env.DB.prepare(
+        "UPDATE sign_in_logs SET revoked_at = ? WHERE id = ? AND user_id = ?",
+      )
+        .bind(Math.floor(Date.now() / 1000), logId, userId)
+        .run();
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : "Revocation failed" };
+    }
   }
 
   // ─── Passkeys ────────────────────────────────────────────────────────────
@@ -897,7 +940,7 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
       if (!user) return { success: false, message: "User not found or deactivated" };
 
       const session = await this.#issueFullSession(user, jwt);
-      void this.#writeSignInLog(user.id, "passkey", context);
+      void this.#writeSignInLog(user.id, "passkey", context, session.jti);
       return session;
     } catch (e) {
       return { success: false, message: e instanceof Error ? e.message : "Verification failed" };
