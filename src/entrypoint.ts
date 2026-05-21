@@ -103,17 +103,24 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     user: { id: string; email: string; display_name: string },
     jwt: JWTConfig,
   ): Promise<FullSessionResult> {
+    // Fetch the admin flag fresh so it reflects the current DB state at login time.
+    const adminRow = await this.env.DB.prepare(
+      "SELECT admin FROM users WHERE id = ?",
+    ).bind(user.id).first<{ admin: number | null }>();
+    const isAdmin = Boolean(adminRow?.admin);
+
     const jti = crypto.randomUUID();
     const token = await signJWT(jwt.issuer, jwt.audience, this.env.JWT_SECRET, {
       jti,
       sub: user.id,
       email: user.email,
       displayName: user.display_name,
+      admin: isAdmin,
     });
 
     await this.env.KV.put(
       `session:${jti}`,
-      JSON.stringify({ userId: user.id, email: user.email, displayName: user.display_name }),
+      JSON.stringify({ userId: user.id, email: user.email, displayName: user.display_name, admin: isAdmin }),
       { expirationTtl: 60 * 60 },
     );
 
