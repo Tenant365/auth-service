@@ -678,13 +678,12 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
 
       if (!user) throw new Error("User not found");
 
-      // Auto-link: persist so future logins skip the email lookup.
+      // Auto-link only if this user doesn't already have a different account for
+      // this provider linked. INSERT OR IGNORE keeps an existing link intact so
+      // a second provider account with the same email can't silently overwrite it.
       await this.env.DB.prepare(
-        `INSERT INTO user_sso_links (user_id, provider, external_user_id, external_email, linked_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (user_id, provider) DO UPDATE SET
-           external_user_id = excluded.external_user_id,
-           external_email    = excluded.external_email`,
+        `INSERT OR IGNORE INTO user_sso_links (user_id, provider, external_user_id, external_email, linked_at)
+         VALUES (?, ?, ?, ?, ?)`,
       ).bind(user.id, provider, externalUserId, email, Math.floor(Date.now() / 1000)).run().catch(() => {});
     }
 
