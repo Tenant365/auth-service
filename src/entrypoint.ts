@@ -647,49 +647,137 @@ export class AuthEntrypoint extends WorkerEntrypoint<Env> {
     jwt: JWTConfig,
     context?: LogContext,
   ): Promise<{ success: boolean; token?: string; refreshToken?: string }> {
-    const user = await this.env.DB.prepare(
-      "SELECT id, display_name, email FROM users WHERE email = ? AND enabled = 1 AND deleted_at IS NULL",
+    // 1. Try to find the user via the persistent SSO links table first.
+    let user: { id: string; display_name: string; email: string } | null = null;
+
+    const link = await this.env.DB.prepare(
+      `SELECT u.id, u.display_name, u.email
+       FROM user_sso_links l
+       JOIN users u ON u.id = l.user_id
+       WHERE l.provider = ? AND l.external_user_id = ?
+         AND u.enabled = 1 AND u.deleted_at IS NULL`,
     )
-      .bind(email)
+      .bind(provider, externalUserId)
       .first<{ id: string; display_name: string; email: string }>();
 
-    if (!user) throw new Error("User not found");
+    if (link) {
+      user = link;
+      // Keep external_email up-to-date in case the provider email changed.
+      await this.env.DB.prepare(
+        "UPDATE user_sso_links SET external_email = ? WHERE user_id = ? AND provider = ?",
+      ).bind(email, user.id, provider).run().catch(() => {});
+    }
 
+    // 2. Fall back to email lookup + auto-link on first SSO login.
+    if (!user) {
+      user = await this.env.DB.prepare(
+        "SELECT id, display_name, email FROM users WHERE email = ? AND enabled = 1 AND deleted_at IS NULL",
+      )
+        .bind(email)
+        .first<{ id: string; display_name: string; email: string }>();
+
+      if (!user) throw new Error("User not found");
+
+      // Auto-link: persist so future logins skip the email lookup.
+      await this.env.DB.prepare(
+        `INSERT INTO user_sso_links (user_id, provider, external_user_id, external_email, linked_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (user_id, provider) DO UPDATE SET
+           external_user_id = excluded.external_user_id,
+           external_email    = excluded.external_email`,
+      ).bind(user.id, provider, externalUserId, email, Math.floor(Date.now() / 1000)).run().catch(() => {});
+    }
+
+    const session = await this.#issueFullSession(user, jwt);
+    void this.#writeSignInLog(user.id, provider, context, session.jti);
+    return session;
+  }
+
+  // ─── SSO Link Management ─────────────────────────────────────────────────────
+
+  /** Issue a short-lived opaque token that the account portal hands to the login
+   *  portal so the SSO callback can verify which user to link without trusting
+   *  query-string user IDs. */
+  async issueLinkToken(userId: string): Promise<string> {
+    const token = crypto.randomUUID();
     await this.env.KV.put(
-      `${provider}:${user.id}:${externalUserId}`,
-      JSON.stringify({ id: user.id, email: user.email, displayName: user.display_name, provider, externalUserId, accessToken }),
-      { expirationTtl: expiresIn },
+      `sso_link_token:${token}`,
+      JSON.stringify({ userId }),
+      { expirationTtl: 60 * 10 },
     );
+    return token;
+  }
 
-    const jti = crypto.randomUUID();
-    const token = await signJWT(jwt.issuer, jwt.audience, this.env.JWT_SECRET, {
-      jti,
-      sub: user.id,
-      email: user.email,
-      displayName: user.display_name,
-      provider,
-      _userId: externalUserId,
-    });
+  /** Called by the login portal SSO callback in link mode.
+   *  Validates the token, then upserts the SSO link for the resolved user. */
+  async consumeLinkToken(
+    token: string,
+    provider: string,
+    externalUserId: string,
+    externalEmail: string | null,
+  ): Promise<{ success: boolean; message?: string }> {
+    const stored = await this.env.KV.get<{ userId: string }>(`sso_link_token:${token}`, "json");
+    if (!stored) return { success: false, message: "Link token expired or invalid" };
 
-    await this.env.KV.put(
-      `session:${jti}`,
-      JSON.stringify({ userId: user.id, email: user.email, displayName: user.display_name, provider, _userId: externalUserId }),
-      { expirationTtl: expiresIn },
-    );
+    await this.env.KV.delete(`sso_link_token:${token}`);
 
-    const refreshPlaintext = generateRandomHex(32);
-    const refreshJti = crypto.randomUUID();
-    const refreshHandle = encodeHandle(refreshJti, refreshPlaintext);
-    const refreshHash = await sha256Hex(refreshPlaintext);
+    try {
+      // Ensure no other account already owns this provider identity.
+      const conflict = await this.env.DB.prepare(
+        "SELECT user_id FROM user_sso_links WHERE provider = ? AND external_user_id = ? AND user_id != ?",
+      ).bind(provider, externalUserId, stored.userId).first<{ user_id: string }>();
 
-    await this.env.KV.put(
-      `refresh:${refreshJti}`,
-      JSON.stringify({ tokenHash: refreshHash, userId: user.id, email: user.email, displayName: user.display_name }),
-      { expirationTtl: Math.min(expiresIn, 60 * 60 * 24 * 14) },
-    );
+      if (conflict) {
+        return { success: false, message: "This provider account is already linked to a different user" };
+      }
 
-    void this.#writeSignInLog(user.id, provider, context, jti);
-    return { success: true, token, refreshToken: refreshHandle };
+      await this.env.DB.prepare(
+        `INSERT INTO user_sso_links (user_id, provider, external_user_id, external_email, linked_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (user_id, provider) DO UPDATE SET
+           external_user_id = excluded.external_user_id,
+           external_email   = excluded.external_email,
+           linked_at        = excluded.linked_at`,
+      ).bind(stored.userId, provider, externalUserId, externalEmail, Math.floor(Date.now() / 1000)).run();
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : "Failed to link account" };
+    }
+  }
+
+  async listSSOLinks(userId: string): Promise<Array<{
+    provider: string;
+    external_email: string | null;
+    linked_at: number;
+  }>> {
+    const result = await this.env.DB.prepare(
+      "SELECT provider, external_email, linked_at FROM user_sso_links WHERE user_id = ? ORDER BY linked_at ASC",
+    )
+      .bind(userId)
+      .all<{ provider: string; external_email: string | null; linked_at: number }>();
+    return result.results;
+  }
+
+  async unlinkSSO(
+    userId: string,
+    provider: string,
+  ): Promise<{ success: boolean; message?: string }> {
+    try {
+      const existing = await this.env.DB.prepare(
+        "SELECT user_id FROM user_sso_links WHERE user_id = ? AND provider = ?",
+      ).bind(userId, provider).first<{ user_id: string }>();
+
+      if (!existing) return { success: false, message: "Provider not linked" };
+
+      await this.env.DB.prepare(
+        "DELETE FROM user_sso_links WHERE user_id = ? AND provider = ?",
+      ).bind(userId, provider).run();
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, message: e instanceof Error ? e.message : "Failed to unlink account" };
+    }
   }
 
   async getSignInLogs(userId: string, limit = 20): Promise<Array<{
