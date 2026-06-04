@@ -4,7 +4,7 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "tenant365-auth-service",
+  "name": "auth-service",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-15",
   "observability": {
